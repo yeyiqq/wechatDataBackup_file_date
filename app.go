@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -359,6 +360,15 @@ func (a *App) ExportWeChatAllData(full bool, acountName string) {
 		} else {
 			log.Println("跳过新消息导出，因为这是全量导出")
 		}
+
+		// 导出后重建数据提供者并通知前端刷新，避免主界面空白
+		prefixPath := "\\User\\" + pInfo.AcountName
+		if a.createWechatDataProvider(expPath, prefixPath) == nil {
+			if infoJson, err := json.Marshal(a.provider.SelfInfo); err == nil {
+				runtime.EventsEmit(a.ctx, "selfInfo", string(infoJson))
+			}
+		}
+		runtime.EventsEmit(a.ctx, "refreshMessageList", "{\"action\":\"refresh\"}")
 
 		a.defaultUser = pInfo.AcountName
 		hasUser := false
@@ -1331,6 +1341,9 @@ func (a *App) processContactNewMessages(contact wechat.WeChatUserInfo, startTime
 		Dialogue:    make([]DialogueMessage, 0),
 	}
 	
+	// 先按时间升序排序，保证最新在最后
+	sort.SliceStable(messages.Rows, func(i, j int) bool { return messages.Rows[i].CreateTime < messages.Rows[j].CreateTime })
+
 	// 处理每条消息 - 按时间顺序排列，最新的消息在最后
 	for _, msg := range messages.Rows {
 		// 跳过系统消息
