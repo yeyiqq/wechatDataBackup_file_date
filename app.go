@@ -1450,6 +1450,10 @@ func (a *App) processMessageContent(msg *wechat.WeChatMessage, savePath string) 
 	case wechat.Wechat_Message_Type_Text:
 		return msg.Content
 		
+	case wechat.Wechat_Message_Type_Emoji:
+		// 表情包消息
+		return "[表情包]"
+		
 	case wechat.Wechat_Message_Type_Picture:
 		if msg.ImagePath != "" {
 			// 构建正确的图片路径
@@ -1601,6 +1605,18 @@ func (a *App) processMiscMessage(msg *wechat.WeChatMessage, savePath string) str
 			}
 		}
 		return "[视频号]"
+		
+	case wechat.Wechat_Misc_Message_Refer:
+		// 引用消息 - 显示格式：[消息]speaker的内容，[引用消息]被引用的人的昵称：被引用的内容
+		if msg.ReferInfo.Content != "" {
+			referContent := msg.ReferInfo.Content
+			referDisplayName := msg.ReferInfo.Displayname
+			if referDisplayName == "" {
+				referDisplayName = "未知用户"
+			}
+			return fmt.Sprintf("[消息]%s，[引用消息]%s：%s", msg.Content, referDisplayName, referContent)
+		}
+		return fmt.Sprintf("[消息]%s，[引用消息]", msg.Content)
 		
 	default:
 		return fmt.Sprintf("[%s]", a.getMiscMessageDescription(msg.SubType))
