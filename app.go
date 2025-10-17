@@ -1051,6 +1051,10 @@ func (a *App) ExportWeChatDataWithIncrementalBackup(full bool, acountName string
 		} else {
 			log.Println("跳过新消息导出，因为这是全量导出")
 		}
+		
+		// 发送导出完成事件，通知前端刷新消息列表
+		runtime.EventsEmit(a.ctx, "exportData", "{\"status\":\"completed\", \"result\":\"导出完成\", \"progress\": 100}")
+		runtime.EventsEmit(a.ctx, "refreshMessageList", "{\"action\":\"refresh\"}")
 
 		// 更新用户配置
 		a.defaultUser = pInfo.AcountName
@@ -1304,12 +1308,12 @@ func (a *App) exportNewMessages(accountName, expPath string) *NewMessageExportRe
 
 // 处理单个联系人的新消息
 func (a *App) processContactNewMessages(contact wechat.WeChatUserInfo, startTime int64, savePath string) *ContactMessageData {
-	// 获取该联系人的新消息
+	// 获取该联系人的新消息 - 使用Backward方向获取大于startTime的消息
 	messages, err := a.provider.WeChatGetMessageListByTime(
 		contact.UserName, 
 		startTime, 
 		1000, // 每次获取1000条消息
-		wechat.Message_Search_Forward,
+		wechat.Message_Search_Backward, // 改为Backward以获取大于startTime的消息
 	)
 	
 	if err != nil {
@@ -1327,10 +1331,19 @@ func (a *App) processContactNewMessages(contact wechat.WeChatUserInfo, startTime
 		Dialogue:    make([]DialogueMessage, 0),
 	}
 	
-	// 处理每条消息
-	for i, msg := range messages.Rows {
+	// 处理每条消息 - 按时间顺序排列，最新的消息在最后
+	for _, msg := range messages.Rows {
 		// 跳过系统消息
 		if msg.Type == wechat.Wechat_Message_Type_System {
+			continue
+		}
+		
+		// 确保只处理2025-10-16之后的消息
+		if msg.CreateTime < startTime {
+			log.Printf("跳过旧消息: %s, 时间: %s, 开始时间: %s", 
+				contact.NickName, 
+				time.Unix(msg.CreateTime, 0).Format("2006-01-02 15:04:05"),
+				time.Unix(startTime, 0).Format("2006-01-02 15:04:05"))
 			continue
 		}
 		
@@ -1387,7 +1400,7 @@ func (a *App) processContactNewMessages(contact wechat.WeChatUserInfo, startTime
 		}
 		
 		dialogueMessage := DialogueMessage{
-			Index:   i + 1,
+			Index:   len(dialogueGroup.Dialogue) + 1, // 使用当前对话长度+1作为index
 			Speaker: speaker,
 			Text:    text,
 			Time:    msgTime,
