@@ -1426,25 +1426,30 @@ func (a *App) processMessageContent(msg *wechat.WeChatMessage, savePath string) 
 		
 	case wechat.Wechat_Message_Type_Picture:
 		if msg.ImagePath != "" {
-			// 检查图片文件是否存在
-			if _, err := os.Stat(msg.ImagePath); err == nil {
-				return fmt.Sprintf("[图片] %s", msg.ImagePath)
+			// 构建正确的图片路径
+			imagePath := a.buildCorrectMediaPath(msg.ImagePath, "Image")
+			if imagePath != "" && a.fileExists(imagePath) {
+				return fmt.Sprintf("[图片] %s", imagePath)
 			}
 		}
 		return "[图片] 文件不存在"
 		
 	case wechat.Wechat_Message_Type_Video:
 		if msg.VideoPath != "" {
-			if _, err := os.Stat(msg.VideoPath); err == nil {
-				return fmt.Sprintf("[视频] %s", msg.VideoPath)
+			// 构建正确的视频路径
+			videoPath := a.buildCorrectMediaPath(msg.VideoPath, "Video")
+			if videoPath != "" && a.fileExists(videoPath) {
+				return fmt.Sprintf("[视频] %s", videoPath)
 			}
 		}
 		return "[视频] 文件不存在"
 		
 	case wechat.Wechat_Message_Type_Voice:
 		if msg.VoicePath != "" {
-			if _, err := os.Stat(msg.VoicePath); err == nil {
-				return fmt.Sprintf("[语音] %s", msg.VoicePath)
+			// 构建正确的语音路径
+			voicePath := a.buildCorrectMediaPath(msg.VoicePath, "Voice")
+			if voicePath != "" && a.fileExists(voicePath) {
+				return fmt.Sprintf("[语音] %s", voicePath)
 			}
 		}
 		return "[语音] 文件不存在"
@@ -1469,13 +1474,61 @@ func (a *App) processMessageContent(msg *wechat.WeChatMessage, savePath string) 
 	}
 }
 
+// 获取杂项消息类型描述
+func (a *App) getMiscMessageDescription(subType int) string {
+	switch subType {
+	case wechat.Wechat_Misc_Message_TEXT:
+		return "文本消息"
+	case wechat.Wechat_Misc_Message_Music:
+		return "音乐消息"
+	case wechat.Wechat_Misc_Message_ThirdVideo:
+		return "第三方视频"
+	case wechat.Wechat_Misc_Message_CardLink:
+		return "链接卡片"
+	case wechat.Wechat_Misc_Message_File:
+		return "文件消息"
+	case wechat.Wechat_Misc_Message_CustomEmoji:
+		return "自定义表情"
+	case wechat.Wechat_Misc_Message_ShareEmoji:
+		return "分享表情"
+	case wechat.Wechat_Misc_Message_ForwardMessage:
+		return "聊天记录合集"
+	case wechat.Wechat_Misc_Message_Applet:
+		return "小程序"
+	case wechat.Wechat_Misc_Message_Applet2:
+		return "小程序2"
+	case wechat.Wechat_Misc_Message_Channels:
+		return "视频号"
+	case wechat.Wechat_Misc_Message_Refer:
+		return "引用消息"
+	case wechat.Wechat_Misc_Message_Live:
+		return "直播"
+	case wechat.Wechat_Misc_Message_Game:
+		return "游戏消息"
+	case wechat.Wechat_Misc_Message_Notice:
+		return "通知消息"
+	case wechat.Wechat_Misc_Message_Live2:
+		return "直播2"
+	case wechat.Wechat_Misc_Message_TingListen:
+		return "听歌识曲"
+	case wechat.Wechat_Misc_Message_Transfer:
+		return "转账消息"
+	case wechat.Wechat_Misc_Message_RedPacket:
+		return "红包消息"
+	default:
+		return fmt.Sprintf("未知杂项消息(%d)", subType)
+	}
+}
+
 // 处理杂项消息
 func (a *App) processMiscMessage(msg *wechat.WeChatMessage, savePath string) string {
 	switch msg.SubType {
 	case wechat.Wechat_Misc_Message_File:
 		if msg.FileInfo.FileName != "" {
-			if _, err := os.Stat(msg.FileInfo.FilePath); err == nil {
-				return fmt.Sprintf("[文件] %s", msg.FileInfo.FilePath)
+			// 构建正确的文件路径
+			filePath := a.buildCorrectMediaPath(msg.FileInfo.FilePath, "File")
+			if filePath != "" && a.fileExists(filePath) {
+				return fmt.Sprintf("[文件] %s", filePath)
 			}
 			return fmt.Sprintf("[文件] %s (文件不存在)", msg.FileInfo.FileName)
 		}
@@ -1489,19 +1542,115 @@ func (a *App) processMiscMessage(msg *wechat.WeChatMessage, savePath string) str
 		
 	case wechat.Wechat_Misc_Message_ThirdVideo:
 		if msg.ThumbPath != "" {
-			return fmt.Sprintf("[第三方视频] %s", msg.ThumbPath)
+			thumbPath := a.buildCorrectMediaPath(msg.ThumbPath, "Thumb")
+			if thumbPath != "" {
+				return fmt.Sprintf("[第三方视频] %s", thumbPath)
+			}
 		}
 		return "[第三方视频]"
 		
+	case wechat.Wechat_Misc_Message_CardLink:
+		if msg.ThumbPath != "" {
+			thumbPath := a.buildCorrectMediaPath(msg.ThumbPath, "Thumb")
+			if thumbPath != "" {
+				return fmt.Sprintf("[链接卡片] %s", thumbPath)
+			}
+		}
+		return "[链接卡片]"
+		
 	case wechat.Wechat_Misc_Message_Applet, wechat.Wechat_Misc_Message_Applet2:
 		if msg.ThumbPath != "" {
-			return fmt.Sprintf("[小程序] %s", msg.ThumbPath)
+			thumbPath := a.buildCorrectMediaPath(msg.ThumbPath, "Thumb")
+			if thumbPath != "" {
+				return fmt.Sprintf("[小程序] %s", thumbPath)
+			}
 		}
 		return "[小程序]"
 		
+	case wechat.Wechat_Misc_Message_Channels:
+		if msg.ThumbPath != "" {
+			thumbPath := a.buildCorrectMediaPath(msg.ThumbPath, "Thumb")
+			if thumbPath != "" {
+				return fmt.Sprintf("[视频号] %s", thumbPath)
+			}
+		}
+		return "[视频号]"
+		
 	default:
-		return fmt.Sprintf("[杂项消息: %d]", msg.SubType)
+		return fmt.Sprintf("[%s]", a.getMiscMessageDescription(msg.SubType))
 	}
+}
+
+// 构建正确的媒体文件路径
+func (a *App) buildCorrectMediaPath(originalPath, mediaType string) string {
+	if originalPath == "" {
+		return ""
+	}
+	
+	// 获取用户数据目录
+	userDataDir := a.FLoader.FilePrefix + "\\User\\" + a.defaultUser
+	
+	// 根据媒体类型构建路径
+	var correctPath string
+	
+	// 处理路径分隔符，确保使用反斜杠
+	normalizedPath := strings.ReplaceAll(originalPath, "/", "\\")
+	
+	// 调试日志：记录原始路径信息
+	log.Printf("媒体文件路径构建开始 - 原始路径: %s, 媒体类型: %s, 用户名: %s", 
+		originalPath, mediaType, a.provider.SelfInfo.UserName)
+	
+	// 检查路径是否已经包含完整路径
+	if strings.Contains(normalizedPath, "FileStorage\\") {
+		// 路径已经包含FileStorage，直接拼接用户数据目录
+		if strings.HasPrefix(normalizedPath, "\\") {
+			correctPath = userDataDir + normalizedPath
+		} else {
+			correctPath = userDataDir + "\\" + normalizedPath
+		}
+	} else {
+		// 路径不包含FileStorage，需要根据媒体类型添加正确的子目录
+		// 确保路径以反斜杠开头
+		if !strings.HasPrefix(normalizedPath, "\\") {
+			normalizedPath = "\\" + normalizedPath
+		}
+		
+		switch mediaType {
+		case "Image":
+			// 图片文件路径：FileStorage/Image/
+			correctPath = userDataDir + "\\FileStorage\\Image" + normalizedPath
+		case "Thumb":
+			// 缩略图路径：FileStorage/MsgAttach/xxx/Thumb/
+			correctPath = userDataDir + "\\FileStorage\\MsgAttach" + normalizedPath
+		case "Video":
+			// 视频文件路径：FileStorage/Video/
+			correctPath = userDataDir + "\\FileStorage\\Video" + normalizedPath
+		case "Voice":
+			// 语音文件路径：FileStorage/Voice/
+			correctPath = userDataDir + "\\FileStorage\\Voice" + normalizedPath
+		case "File":
+			// 文件路径：FileStorage/File/
+			correctPath = userDataDir + "\\FileStorage\\File" + normalizedPath
+		default:
+			// 默认路径：FileStorage/
+			correctPath = userDataDir + "\\FileStorage" + normalizedPath
+		}
+	}
+	
+	// 清理路径中的双反斜杠
+	correctPath = strings.ReplaceAll(correctPath, "\\\\", "\\")
+	
+	// 调试日志
+	log.Printf("媒体文件路径构建完成 - 构建路径: %s, 文件存在: %v", 
+		correctPath, a.fileExists(correctPath))
+	
+	return correctPath
+}
+
+// 检查文件是否存在
+func (a *App) fileExists(filePath string) bool {
+	_, err := os.Stat(filePath)
+	return err == nil
 }
 
 // 保存联系人消息到JSON文件
@@ -1583,6 +1732,26 @@ func (a *App) TestNewMessageExport(accountName string) string {
 	// 设置导出路径
 	expPath := a.FLoader.FilePrefix + "\\User\\" + accountName
 	log.Println("测试导出路径:", expPath)
+	
+	// 测试各种路径格式
+	testCases := []struct {
+		path      string
+		mediaType string
+		desc      string
+	}{
+		{"test/path/file.jpg", "Image", "简单图片路径"},
+		{"test/path/document.docx", "File", "简单文件路径"},
+		{"FileStorage/File/2025-10/2.下降沿实例说明(11).JSON", "File", "包含FileStorage的文件路径"},
+		{"\\FileStorage\\Image\\2025-10\\test.jpg", "Image", "以反斜杠开头的图片路径"},
+		{"FileStorage\\Video\\2025-10\\test.mp4", "Video", "包含FileStorage的视频路径"},
+		{"MsgAttach\\abc123\\Image\\test.jpg", "Image", "MsgAttach图片路径"},
+		{"MsgAttach\\abc123\\Thumb\\test.jpg", "Thumb", "MsgAttach缩略图路径"},
+	}
+	
+	for _, tc := range testCases {
+		resultPath := a.buildCorrectMediaPath(tc.path, tc.mediaType)
+		log.Printf("测试 %s: %s -> %s", tc.desc, tc.path, resultPath)
+	}
 	
 	// 执行新消息导出
 	result := a.exportNewMessages(accountName, expPath)

@@ -403,8 +403,8 @@ func exportWeChatVideoAndFile(info WeChatInfo, expPath string, progress chan<- s
 func exportWeChatBat(info WeChatInfo, expPath string, progress chan<- string) {
 	progress <- "{\"status\":\"processing\", \"result\":\"export WeChat Dat start\", \"progress\": 21}"
 	datRootPath := info.FilePath + "\\FileStorage\\MsgAttach"
-	imageRootPath := info.FilePath + "\\FileStorage\\Image"
-	rootPaths := []string{datRootPath, imageRootPath}
+	// 图片文件实际在MsgAttach的Image子目录中，解码后保存到FileStorage/Image
+	rootPaths := []string{datRootPath}
 
 	handleNumber := int64(0)
 	fileNumber := int64(0)
@@ -432,9 +432,12 @@ func exportWeChatBat(info WeChatInfo, expPath string, progress chan<- string) {
 				if !finfo.IsDir() && strings.HasSuffix(path, ".dat") {
 					// 确定输出路径：如果是图片，保存到 Image 目录
 					var expFile string
-					if strings.Contains(path, "\\FileStorage\\Image\\") {
-						// 图片文件保存到 FileStorage/Image 目录
-						expFile = expPath + "\\FileStorage\\Image" + path[len(imageRootPath):]
+					if strings.Contains(path, "\\MsgAttach\\") && strings.Contains(path, "\\Image\\") {
+						// 图片文件从MsgAttach/xxx/Image/解码后保存到FileStorage/Image/目录
+						relativePath := strings.TrimPrefix(path, datRootPath)
+						// 将路径中的MsgAttach/xxx/Image/替换为直接保存到FileStorage/Image/
+						relativePath = strings.Replace(relativePath, "\\MsgAttach", "", 1)
+						expFile = expPath + "\\FileStorage\\Image" + relativePath
 					} else {
 						// 其他文件保持原有路径结构
 						expFile = expPath + path[len(info.FilePath):]
