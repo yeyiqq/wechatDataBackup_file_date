@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -78,13 +79,24 @@ func DecryptDat(inFile string, outFile string) error {
 
 	var preTenBts = make([]byte, 10)
 	_, _ = sourceFile.Read(preTenBts)
-	decodeByte, _, er := findDecodeByte(preTenBts)
+	decodeByte, ext, er := findDecodeByte(preTenBts)
 	if er != nil {
 		log.Println(er.Error())
 		return err
 	}
 
-	distFile, er := os.Create(outFile)
+	// 根据检测到的图片格式修改输出文件扩展名
+	outFileWithExt := outFile
+	if ext != "" {
+		// 移除原来的扩展名并添加正确的扩展名
+		if strings.HasSuffix(outFile, ".dat") {
+			outFileWithExt = strings.TrimSuffix(outFile, ".dat") + ext
+		} else {
+			outFileWithExt = outFile + ext
+		}
+	}
+
+	distFile, er := os.Create(outFileWithExt)
 	if er != nil {
 		log.Println(er.Error())
 		return err
@@ -108,7 +120,7 @@ func DecryptDat(inFile string, outFile string) error {
 	_ = writer.Flush()
 	_ = distFile.Close()
 	_ = sourceFile.Close()
-	// fmt.Println("output file：", distFile.Name())
+	log.Printf("Decrypted image saved: %s", outFileWithExt)
 
 	return nil
 }
@@ -127,13 +139,22 @@ func handlerOne(info os.FileInfo, dir string, outputDir string) {
 
 	var preTenBts = make([]byte, 10)
 	_, _ = sourceFile.Read(preTenBts)
-	decodeByte, _, er := findDecodeByte(preTenBts)
+	decodeByte, ext, er := findDecodeByte(preTenBts)
 	if er != nil {
 		fmt.Println(er.Error())
 		return
 	}
 
-	distFile, er := os.Create(outputDir + "/" + info.Name())
+	// 根据检测到的图片格式修改输出文件名
+	outputFileName := info.Name()
+	if ext != "" {
+		// 移除原来的扩展名并添加正确的扩展名
+		if strings.HasSuffix(outputFileName, ".dat") {
+			outputFileName = strings.TrimSuffix(outputFileName, ".dat") + ext
+		}
+	}
+
+	distFile, er := os.Create(outputDir + "/" + outputFileName)
 	if er != nil {
 		fmt.Println(er.Error())
 		return

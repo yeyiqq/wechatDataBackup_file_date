@@ -18,6 +18,10 @@ export function ExportWeChatDataByUserName(arg1, arg2) {
   return window['go']['main']['App']['ExportWeChatDataByUserName'](arg1, arg2);
 }
 
+export function ExportWeChatDataWithIncrementalBackup(arg1, arg2, arg3, arg4) {
+  return window['go']['main']['App']['ExportWeChatDataWithIncrementalBackup'](arg1, arg2, arg3, arg4);
+}
+
 export function GetAppIsFirstStart() {
   return window['go']['main']['App']['GetAppIsFirstStart']();
 }
@@ -32,6 +36,14 @@ export function GetAppVersion() {
 
 export function GetExportPathStat() {
   return window['go']['main']['App']['GetExportPathStat']();
+}
+
+export function GetIncrementalBackupConfig() {
+  return window['go']['main']['App']['GetIncrementalBackupConfig']();
+}
+
+export function GetNewMessageExportConfig() {
+  return window['go']['main']['App']['GetNewMessageExportConfig']();
 }
 
 export function GetSessionBookMaskList(arg1) {
@@ -106,12 +118,24 @@ export function SelectedDirDialog(arg1) {
   return window['go']['main']['App']['SelectedDirDialog'](arg1);
 }
 
+export function SetIncrementalBackupConfig(arg1) {
+  return window['go']['main']['App']['SetIncrementalBackupConfig'](arg1);
+}
+
+export function SetNewMessageExportConfig(arg1) {
+  return window['go']['main']['App']['SetNewMessageExportConfig'](arg1);
+}
+
 export function SetSessionBookMask(arg1, arg2, arg3) {
   return window['go']['main']['App']['SetSessionBookMask'](arg1, arg2, arg3);
 }
 
 export function SetSessionLastTime(arg1, arg2, arg3) {
   return window['go']['main']['App']['SetSessionLastTime'](arg1, arg2, arg3);
+}
+
+export function TestNewMessageExport(arg1) {
+  return window['go']['main']['App']['TestNewMessageExport'](arg1);
 }
 
 export function WeChatInit() {

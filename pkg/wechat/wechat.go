@@ -430,7 +430,16 @@ func exportWeChatBat(info WeChatInfo, expPath string, progress chan<- string) {
 				}
 
 				if !finfo.IsDir() && strings.HasSuffix(path, ".dat") {
-					expFile := expPath + path[len(info.FilePath):]
+					// 确定输出路径：如果是图片，保存到 Image 目录
+					var expFile string
+					if strings.Contains(path, "\\FileStorage\\Image\\") {
+						// 图片文件保存到 FileStorage/Image 目录
+						expFile = expPath + "\\FileStorage\\Image" + path[len(imageRootPath):]
+					} else {
+						// 其他文件保持原有路径结构
+						expFile = expPath + path[len(info.FilePath):]
+					}
+					
 					_, err := os.Stat(filepath.Dir(expFile))
 					if err != nil {
 						os.MkdirAll(filepath.Dir(expFile), 0644)
