@@ -74,6 +74,8 @@ export function TestActualImageMessage(arg1:string):Promise<string>;
 
 export function TestActualImagePathDebug(arg1:string):Promise<string>;
 
+export function TestAutoUpdateTime():Promise<string>;
+
 export function TestFileStorageNewDataBackup(arg1:string):Promise<string>;
 
 export function TestImagePathFix(arg1:string):Promise<string>;

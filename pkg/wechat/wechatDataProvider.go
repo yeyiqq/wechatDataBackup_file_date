@@ -906,6 +906,14 @@ func (P *WechatDataProvider) wechatMessageExtraHandle(msg *WeChatMessage) {
 		return
 	}
 
+	// 调试通知消息的BytesExtra数据
+	if msg.Type == 49 && msg.SubType == 87 {
+		log.Printf("通知消息BytesExtra调试 - Field1数量: %d", len(extra.Message2))
+		for i, ext := range extra.Message2 {
+			log.Printf("通知消息BytesExtra调试 - Message2[%d]: Field1=%d, Field2='%s'", i, ext.Field1, ext.Field2)
+		}
+	}
+
 	for _, ext := range extra.Message2 {
 		switch ext.Field1 {
 		case 1:
@@ -1524,11 +1532,17 @@ func WechatGetAccountInfo(resPath, prefixRes, accountName string) (*WeChatAccoun
 }
 
 func systemMsgParse(msgType int, content string) string {
-	if msgType != Wechat_Message_Type_System {
-		return content
+	// 处理系统消息和通知消息
+	if msgType == Wechat_Message_Type_System {
+		return utils.Html2Text(content)
 	}
-
-	return utils.Html2Text(content)
+	
+	// 对于其他类型的消息，如果内容包含HTML标签，也进行解析
+	if strings.Contains(content, "<") && strings.Contains(content, ">") {
+		return utils.Html2Text(content)
+	}
+	
+	return content
 }
 
 func (P *WechatDataProvider) urlconvertCacheName(url string, timestamp int64) string {

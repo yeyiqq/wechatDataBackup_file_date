@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -124,6 +125,8 @@ type App struct {
 	firstStart  bool
 	firstInit   bool
 	FLoader     *FileLoader
+	// 新消息导出时间变量，默认为2025年10月16日 00:00:00
+	NewMessageStartTime int64
 }
 
 type WeChatInfo struct {
@@ -226,6 +229,8 @@ func NewApp() *App {
 	log.Println("App version:", appVersion)
 	a.firstInit = true
 	a.FLoader = NewFileLoader(".\\")
+	// 初始化新消息导出时间，默认为2025年10月16日 00:00:00
+	a.NewMessageStartTime = time.Date(2025, 10, 16, 0, 0, 0, 0, time.Local).Unix()
 	viper.SetConfigName(defaultConfig)
 	viper.SetConfigType("json")
 	viper.AddConfigPath(".")
@@ -236,6 +241,11 @@ func NewApp() *App {
 		if prefix != "" {
 			log.Println("SetFilePrefix", prefix)
 			a.FLoader.SetFilePrefix(prefix)
+		}
+		// 从配置文件读取新消息开始时间
+		if startTime := viper.GetInt64("newMessageStartTime"); startTime > 0 {
+			a.NewMessageStartTime = startTime
+			log.Printf("从配置文件读取新消息开始时间: %s", time.Unix(a.NewMessageStartTime, 0).Format("2006-01-02 15:04:05"))
 		}
 	} else {
 		log.Println("not config exist")
@@ -1257,8 +1267,8 @@ func (a *App) exportNewMessages(accountName, expPath string) *NewMessageExportRe
 	log.Println("Starting new message export...")
 	log.Println("账号名:", accountName, "导出路径:", expPath)
 	
-	// 设置开始时间：2025年10月16日 00:00:00
-	startTime := time.Date(2025, 10, 16, 0, 0, 0, 0, time.Local).Unix()
+	// 使用配置的新消息开始时间
+	startTime := a.NewMessageStartTime
 	
 	// 创建保存目录
 	saveTime := time.Now().Format("2006-01-02_15-04-05")
@@ -1325,16 +1335,24 @@ func (a *App) exportNewMessages(accountName, expPath string) *NewMessageExportRe
 	
 	result.TotalContacts = len(result.Contacts)
 	
-	// 备份FileStorage目录中2025年10月16日之后的新数据
-	log.Println("开始备份FileStorage目录中的新数据...")
-	fileStorageBackupCount := a.backupFileStorageNewData(expPath, userBackupPath, startTime)
-	log.Printf("FileStorage新数据备份完成，共备份 %d 个文件", fileStorageBackupCount)
+	// 扫描JSON文件，收集所有出现过的文件路径
+	log.Println("开始扫描JSON文件，收集文件路径...")
+	referencedFiles := a.scanJSONFilesForReferencedPaths(savePath)
+	log.Printf("从JSON文件中收集到 %d 个文件路径", len(referencedFiles))
+	
+	// 备份FileStorage目录中JSON文件引用的文件
+	log.Println("开始备份JSON文件中引用的文件...")
+	fileStorageBackupCount := a.backupReferencedFiles(expPath, userBackupPath, referencedFiles)
+	log.Printf("FileStorage引用文件备份完成，共备份 %d 个文件", fileStorageBackupCount)
 	
 	// 统计备份的媒体文件数量
 	result.BackupFilesCount = a.countBackupFiles(userBackupPath)
 	
 	log.Printf("New message export completed: %d contacts, %d total messages, %d backup files", 
 		result.TotalContacts, result.TotalMessages, result.BackupFilesCount)
+	
+	// 导出完成后，更新新消息开始时间为当前时间
+	a.updateNewMessageStartTime()
 	
 	return result
 }
@@ -1484,8 +1502,8 @@ func (a *App) processMessageContentWithBackup(msg *wechat.WeChatMessage, savePat
 			imagePath := a.buildCorrectMediaPath(msg.ImagePath, "Image")
 			log.Printf("图片路径构建结果: %s, 文件存在: %v", imagePath, a.fileExists(imagePath))
 			if imagePath != "" && a.fileExists(imagePath) {
-				// 备份图片文件
-				backupPath := a.backupMediaFile(imagePath, userBackupPath, "Image")
+			// 备份图片文件
+			backupPath := a.backupMediaFile(imagePath, userBackupPath, "Image", a.NewMessageStartTime)
 				if backupPath != "" {
 					return fmt.Sprintf("[图片] %s", backupPath)
 				}
@@ -1499,8 +1517,8 @@ func (a *App) processMessageContentWithBackup(msg *wechat.WeChatMessage, savePat
 			thumbPath := a.buildCorrectMediaPath(msg.ThumbPath, "Image")
 			log.Printf("缩略图路径构建结果: %s, 文件存在: %v", thumbPath, a.fileExists(thumbPath))
 			if thumbPath != "" && a.fileExists(thumbPath) {
-				// 备份图片文件
-				backupPath := a.backupMediaFile(thumbPath, userBackupPath, "Image")
+			// 备份图片文件
+			backupPath := a.backupMediaFile(thumbPath, userBackupPath, "Image", a.NewMessageStartTime)
 				if backupPath != "" {
 					return fmt.Sprintf("[图片] %s", backupPath)
 				}
@@ -1516,8 +1534,8 @@ func (a *App) processMessageContentWithBackup(msg *wechat.WeChatMessage, savePat
 			// 构建正确的视频路径
 			videoPath := a.buildCorrectMediaPath(msg.VideoPath, "Video")
 			if videoPath != "" && a.fileExists(videoPath) {
-				// 备份视频文件
-				backupPath := a.backupMediaFile(videoPath, userBackupPath, "Video")
+			// 备份视频文件
+			backupPath := a.backupMediaFile(videoPath, userBackupPath, "Video", a.NewMessageStartTime)
 				if backupPath != "" {
 					return fmt.Sprintf("[视频] %s", backupPath)
 				}
@@ -1531,8 +1549,8 @@ func (a *App) processMessageContentWithBackup(msg *wechat.WeChatMessage, savePat
 			// 构建正确的语音路径
 			voicePath := a.buildCorrectMediaPath(msg.VoicePath, "Voice")
 			if voicePath != "" && a.fileExists(voicePath) {
-				// 备份语音文件
-				backupPath := a.backupMediaFile(voicePath, userBackupPath, "Voice")
+			// 备份语音文件
+			backupPath := a.backupMediaFile(voicePath, userBackupPath, "Voice", a.NewMessageStartTime)
 				if backupPath != "" {
 					return fmt.Sprintf("[语音] %s", backupPath)
 				}
@@ -1555,6 +1573,10 @@ func (a *App) processMessageContentWithBackup(msg *wechat.WeChatMessage, savePat
 		
 	case wechat.Wechat_Message_Type_Misc:
 		return a.processMiscMessageWithBackup(msg, savePath, userBackupPath)
+		
+	case wechat.Wechat_Message_Type_Voip:
+		// 语音视频消息
+		return "[语音视频]"
 		
 	default:
 		return fmt.Sprintf("[其他消息类型: %d]", msg.Type)
@@ -1616,6 +1638,10 @@ func (a *App) processMessageContent(msg *wechat.WeChatMessage, savePath string) 
 	case wechat.Wechat_Message_Type_Misc:
 		return a.processMiscMessage(msg, savePath)
 		
+	case wechat.Wechat_Message_Type_Voip:
+		// 语音视频消息
+		return "[语音视频]"
+		
 	default:
 		return fmt.Sprintf("[其他消息类型: %d]", msg.Type)
 	}
@@ -1675,8 +1701,8 @@ func (a *App) processMiscMessageWithBackup(msg *wechat.WeChatMessage, savePath, 
 			// 构建正确的文件路径
 			filePath := a.buildCorrectMediaPath(msg.FileInfo.FilePath, "File")
 			if filePath != "" && a.fileExists(filePath) {
-				// 备份文件
-				backupPath := a.backupMediaFile(filePath, userBackupPath, "File")
+			// 备份文件
+			backupPath := a.backupMediaFile(filePath, userBackupPath, "File", a.NewMessageStartTime)
 				if backupPath != "" {
 					return fmt.Sprintf("[文件] %s", backupPath)
 				}
@@ -1696,8 +1722,8 @@ func (a *App) processMiscMessageWithBackup(msg *wechat.WeChatMessage, savePath, 
 		if msg.ThumbPath != "" {
 			thumbPath := a.buildCorrectMediaPath(msg.ThumbPath, "Thumb")
 			if thumbPath != "" && a.fileExists(thumbPath) {
-				// 备份缩略图
-				backupPath := a.backupMediaFile(thumbPath, userBackupPath, "Thumb")
+			// 备份缩略图
+			backupPath := a.backupMediaFile(thumbPath, userBackupPath, "Thumb", a.NewMessageStartTime)
 				if backupPath != "" {
 					return fmt.Sprintf("[第三方视频] %s", backupPath)
 				}
@@ -1710,8 +1736,8 @@ func (a *App) processMiscMessageWithBackup(msg *wechat.WeChatMessage, savePath, 
 		if msg.ThumbPath != "" {
 			thumbPath := a.buildCorrectMediaPath(msg.ThumbPath, "Thumb")
 			if thumbPath != "" && a.fileExists(thumbPath) {
-				// 备份缩略图
-				backupPath := a.backupMediaFile(thumbPath, userBackupPath, "Thumb")
+			// 备份缩略图
+			backupPath := a.backupMediaFile(thumbPath, userBackupPath, "Thumb", a.NewMessageStartTime)
 				if backupPath != "" {
 					return fmt.Sprintf("[链接卡片] %s", backupPath)
 				}
@@ -1724,8 +1750,8 @@ func (a *App) processMiscMessageWithBackup(msg *wechat.WeChatMessage, savePath, 
 		if msg.ThumbPath != "" {
 			thumbPath := a.buildCorrectMediaPath(msg.ThumbPath, "Thumb")
 			if thumbPath != "" && a.fileExists(thumbPath) {
-				// 备份缩略图
-				backupPath := a.backupMediaFile(thumbPath, userBackupPath, "Thumb")
+			// 备份缩略图
+			backupPath := a.backupMediaFile(thumbPath, userBackupPath, "Thumb", a.NewMessageStartTime)
 				if backupPath != "" {
 					return fmt.Sprintf("[小程序] %s", backupPath)
 				}
@@ -1738,8 +1764,8 @@ func (a *App) processMiscMessageWithBackup(msg *wechat.WeChatMessage, savePath, 
 		if msg.ThumbPath != "" {
 			thumbPath := a.buildCorrectMediaPath(msg.ThumbPath, "Thumb")
 			if thumbPath != "" && a.fileExists(thumbPath) {
-				// 备份缩略图
-				backupPath := a.backupMediaFile(thumbPath, userBackupPath, "Thumb")
+			// 备份缩略图
+			backupPath := a.backupMediaFile(thumbPath, userBackupPath, "Thumb", a.NewMessageStartTime)
 				if backupPath != "" {
 					return fmt.Sprintf("[视频号] %s", backupPath)
 				}
@@ -1759,6 +1785,15 @@ func (a *App) processMiscMessageWithBackup(msg *wechat.WeChatMessage, savePath, 
 			return fmt.Sprintf("[消息]%s，[引用消息]%s：%s", msg.Content, referDisplayName, referContent)
 		}
 		return fmt.Sprintf("[消息]%s，[引用消息]", msg.Content)
+		
+	case wechat.Wechat_Misc_Message_Notice:
+		// 通知消息 - 显示消息内容
+		log.Printf("通知消息调试 - Content: '%s', MsgSvrId: '%s', Type: %d, SubType: %d", 
+			msg.Content, msg.MsgSvrId, msg.Type, msg.SubType)
+		if msg.Content != "" {
+			return fmt.Sprintf("[通知消息] %s", msg.Content)
+		}
+		return "[通知消息]"
 		
 	default:
 		return fmt.Sprintf("[%s]", a.getMiscMessageDescription(msg.SubType))
@@ -1832,6 +1867,15 @@ func (a *App) processMiscMessage(msg *wechat.WeChatMessage, savePath string) str
 			return fmt.Sprintf("[消息]%s，[引用消息]%s：%s", msg.Content, referDisplayName, referContent)
 		}
 		return fmt.Sprintf("[消息]%s，[引用消息]", msg.Content)
+		
+	case wechat.Wechat_Misc_Message_Notice:
+		// 通知消息 - 显示消息内容
+		log.Printf("通知消息调试 - Content: '%s', MsgSvrId: '%s', Type: %d, SubType: %d", 
+			msg.Content, msg.MsgSvrId, msg.Type, msg.SubType)
+		if msg.Content != "" {
+			return fmt.Sprintf("[通知消息] %s", msg.Content)
+		}
+		return "[通知消息]"
 		
 	default:
 		return fmt.Sprintf("[%s]", a.getMiscMessageDescription(msg.SubType))
@@ -1917,8 +1961,28 @@ func (a *App) fileExists(filePath string) bool {
 }
 
 // 备份媒体文件到指定目录，保持原有目录结构
-func (a *App) backupMediaFile(sourcePath, userBackupPath, mediaType string) string {
+func (a *App) backupMediaFile(sourcePath, userBackupPath, mediaType string, startTime int64) string {
 	if sourcePath == "" || !a.fileExists(sourcePath) {
+		return ""
+	}
+	
+	// 检查文件修改时间是否在指定时间之后
+	if fileInfo, err := os.Stat(sourcePath); err == nil {
+		fileModTime := fileInfo.ModTime().Unix()
+		startTimeObj := time.Unix(startTime, 0)
+		fileModTimeObj := time.Unix(fileModTime, 0)
+		
+		// 如果文件修改时间早于开始时间，跳过备份
+		if fileModTimeObj.Before(startTimeObj) {
+			log.Printf("文件修改时间早于开始时间，跳过备份: %s (修改时间: %s, 开始时间: %s)", 
+				sourcePath, fileModTimeObj.Format("2006-01-02 15:04:05"), startTimeObj.Format("2006-01-02 15:04:05"))
+			return ""
+		}
+		
+		log.Printf("文件符合时间条件，准备备份: %s (修改时间: %s)", 
+			sourcePath, fileModTimeObj.Format("2006-01-02 15:04:05"))
+	} else {
+		log.Printf("无法获取文件信息: %s, %v", sourcePath, err)
 		return ""
 	}
 	
@@ -1980,9 +2044,45 @@ func (a *App) backupFileStorageNewData(expPath, userBackupPath string, startTime
 			return nil
 		}
 		
-		// 检查文件修改时间是否在指定时间之后
-		fileModTime := info.ModTime()
-		if fileModTime.After(startTimeObj) || fileModTime.Equal(startTimeObj) {
+		// 检查文件路径中的日期是否在指定时间之后
+		// 从文件路径中提取日期，格式如：2025-09, 2025-10
+		pathDateStr := ""
+		if strings.Contains(path, "\\2025-") {
+			parts := strings.Split(path, "\\")
+			for _, part := range parts {
+				if strings.HasPrefix(part, "2025-") {
+					pathDateStr = part
+					break
+				}
+			}
+		}
+		
+		// 如果路径中包含日期，使用路径日期判断；否则使用文件修改时间
+		shouldBackup := false
+		if pathDateStr != "" {
+			// 解析路径中的日期，如 "2025-10" 或 "2025-09"
+			pathDate, err := time.Parse("2006-01", pathDateStr)
+			if err == nil {
+				// 比较路径日期和开始时间
+				shouldBackup = pathDate.After(startTimeObj) || pathDate.Equal(startTimeObj)
+				log.Printf("检查文件路径日期: %s, 路径日期: %s, 开始时间: %s, 是否晚于: %v", 
+					path, pathDate.Format("2006-01-02"), startTimeObj.Format("2006-01-02"), shouldBackup)
+			} else {
+				// 如果解析失败，使用文件修改时间
+				fileModTime := info.ModTime()
+				shouldBackup = fileModTime.After(startTimeObj)
+				log.Printf("路径日期解析失败，使用修改时间: %s, 修改时间: %s, 开始时间: %s, 是否晚于: %v", 
+					path, fileModTime.Format("2006-01-02 15:04:05"), startTimeObj.Format("2006-01-02 15:04:05"), shouldBackup)
+			}
+		} else {
+			// 如果路径中没有日期，使用文件修改时间
+			fileModTime := info.ModTime()
+			shouldBackup = fileModTime.After(startTimeObj)
+			log.Printf("路径中无日期，使用修改时间: %s, 修改时间: %s, 开始时间: %s, 是否晚于: %v", 
+				path, fileModTime.Format("2006-01-02 15:04:05"), startTimeObj.Format("2006-01-02 15:04:05"), shouldBackup)
+		}
+		
+		if shouldBackup {
 			// 特殊处理：如果是MsgAttach目录中的图片文件，需要检查是否是解码后的文件
 			if strings.Contains(path, "\\MsgAttach\\") && strings.Contains(path, "\\Image\\") {
 				// 检查是否是常见图片格式
@@ -2032,8 +2132,7 @@ func (a *App) backupFileStorageNewData(expPath, userBackupPath string, startTime
 			}
 			
 			backupCount++
-			log.Printf("成功备份新文件: %s -> %s (修改时间: %s)", 
-				path, backupFilePath, fileModTime.Format("2006-01-02 15:04:05"))
+			log.Printf("成功备份新文件: %s -> %s", path, backupFilePath)
 		}
 		
 		return nil
@@ -2044,6 +2143,133 @@ func (a *App) backupFileStorageNewData(expPath, userBackupPath string, startTime
 	}
 	
 	log.Printf("FileStorage新数据备份完成，共备份 %d 个文件", backupCount)
+	return backupCount
+}
+
+// 扫描JSON文件，收集所有出现过的文件路径
+func (a *App) scanJSONFilesForReferencedPaths(savePath string) map[string]bool {
+	referencedFiles := make(map[string]bool)
+	
+	// 扫描save目录下的所有JSON文件
+	err := filepath.Walk(savePath, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil
+		}
+		
+		// 只处理JSON文件
+		if !strings.HasSuffix(strings.ToLower(path), ".json") {
+			return nil
+		}
+		
+		// 读取JSON文件内容
+		content, err := os.ReadFile(path)
+		if err != nil {
+			log.Printf("读取JSON文件失败: %s, %v", path, err)
+			return nil
+		}
+		
+		// 解析JSON内容，提取文件路径
+		var messages []map[string]interface{}
+		if err := json.Unmarshal(content, &messages); err != nil {
+			log.Printf("解析JSON文件失败: %s, %v", path, err)
+			return nil
+		}
+		
+		// 遍历消息，提取文件路径
+		for _, msg := range messages {
+			if text, ok := msg["text"].(string); ok {
+				// 查找文件路径模式
+				filePaths := a.extractFilePathsFromText(text)
+				for _, filePath := range filePaths {
+					referencedFiles[filePath] = true
+				}
+			}
+		}
+		
+		return nil
+	})
+	
+	if err != nil {
+		log.Printf("扫描JSON文件时出错: %v", err)
+	}
+	
+	return referencedFiles
+}
+
+// 从文本中提取文件路径
+func (a *App) extractFilePathsFromText(text string) []string {
+	var filePaths []string
+	
+	// 匹配模式：save\路径 或 [图片] 路径 或 [视频] 路径 等
+	patterns := []string{
+		`save\\([^\\s\\]]+)`,           // save\路径
+		`\\[图片\\]\\s+([^\\s\\]]+)`,    // [图片] 路径
+		`\\[视频\\]\\s+([^\\s\\]]+)`,    // [视频] 路径
+		`\\[语音\\]\\s+([^\\s\\]]+)`,    // [语音] 路径
+		`\\[文件\\]\\s+([^\\s\\]]+)`,    // [文件] 路径
+		`\\[链接卡片\\]\\s+([^\\s\\]]+)`, // [链接卡片] 路径
+		`\\[小程序\\]\\s+([^\\s\\]]+)`,  // [小程序] 路径
+		`\\[视频号\\]\\s+([^\\s\\]]+)`,  // [视频号] 路径
+	}
+	
+	for _, pattern := range patterns {
+		re := regexp.MustCompile(pattern)
+		matches := re.FindAllStringSubmatch(text, -1)
+		for _, match := range matches {
+			if len(match) > 1 {
+				filePath := match[1]
+				// 清理路径，移除可能的引号等
+				filePath = strings.Trim(filePath, `"'`)
+				if filePath != "" {
+					filePaths = append(filePaths, filePath)
+				}
+			}
+		}
+	}
+	
+	return filePaths
+}
+
+// 备份JSON文件中引用的文件
+func (a *App) backupReferencedFiles(expPath, userBackupPath string, referencedFiles map[string]bool) int {
+	backupCount := 0
+	
+	for filePath := range referencedFiles {
+		// 构建完整的源文件路径
+		sourcePath := expPath + "\\" + filePath
+		
+		// 检查源文件是否存在
+		if _, err := os.Stat(sourcePath); err != nil {
+			log.Printf("引用文件不存在: %s", sourcePath)
+			continue
+		}
+		
+		// 构建备份目标路径
+		backupFilePath := filepath.Join(userBackupPath, filePath)
+		backupDir := filepath.Dir(backupFilePath)
+		
+		// 创建备份目录
+		if err := os.MkdirAll(backupDir, os.ModePerm); err != nil {
+			log.Printf("创建备份目录失败: %s, %v", backupDir, err)
+			continue
+		}
+		
+		// 检查文件是否已经备份过
+		if _, err := os.Stat(backupFilePath); err == nil {
+			log.Printf("文件已备份，跳过: %s", backupFilePath)
+			continue
+		}
+		
+		// 复制文件
+		if _, err := utils.CopyFile(sourcePath, backupFilePath); err != nil {
+			log.Printf("备份文件失败: %s -> %s, %v", sourcePath, backupFilePath, err)
+			continue
+		}
+		
+		backupCount++
+		log.Printf("成功备份引用文件: %s -> %s", sourcePath, backupFilePath)
+	}
+	
 	return backupCount
 }
 
@@ -2129,13 +2355,47 @@ func (a *App) GetNewMessageExportConfig() string {
 	// 返回默认配置
 	defaultConfig := NewMessageExportConfig{
 		EnableExport:   true,
-		StartTime:      time.Date(2025, 10, 16, 0, 0, 0, 0, time.Local).Unix(),
+		StartTime:      a.NewMessageStartTime,
 		SavePath:       ".\\save",
 		IncludeMedia:   true,
 		GroupByContact: true,
 	}
 	configJson, _ := json.MarshalIndent(defaultConfig, "", "  ")
 	return string(configJson)
+}
+
+// saveConfigToFile 保存配置到文件
+func (a *App) saveConfigToFile() error {
+	// 更新viper中的配置
+	viper.Set("newMessageStartTime", a.NewMessageStartTime)
+	
+	// 保存到配置文件
+	return viper.WriteConfig()
+}
+
+// updateNewMessageStartTime 更新新消息开始时间并保存到配置文件
+func (a *App) updateNewMessageStartTime() {
+	// 更新为当前时间
+	a.NewMessageStartTime = time.Now().Unix()
+	
+	// 保存到配置文件
+	if err := a.saveConfigToFile(); err != nil {
+		log.Printf("保存配置失败: %v", err)
+	} else {
+		log.Printf("新消息开始时间已更新为: %s", time.Unix(a.NewMessageStartTime, 0).Format("2006-01-02 15:04:05"))
+	}
+}
+
+// 测试自动更新时间功能
+func (a *App) TestAutoUpdateTime() string {
+	log.Printf("当前新消息开始时间: %s", time.Unix(a.NewMessageStartTime, 0).Format("2006-01-02 15:04:05"))
+	
+	// 模拟更新时间为当前时间
+	a.updateNewMessageStartTime()
+	
+	log.Printf("更新后的新消息开始时间: %s", time.Unix(a.NewMessageStartTime, 0).Format("2006-01-02 15:04:05"))
+	
+	return fmt.Sprintf("时间更新测试完成，新时间: %s", time.Unix(a.NewMessageStartTime, 0).Format("2006-01-02 15:04:05"))
 }
 
 // 测试新消息导出功能
@@ -2206,7 +2466,7 @@ func (a *App) TestMediaFileBackup(accountName string) string {
 	backupResults := make(map[string]string)
 	for _, testFile := range testFiles {
 		sourcePath := expPath + "\\" + testFile
-		backupPath := a.backupMediaFile(sourcePath, userBackupPath, "Test")
+		backupPath := a.backupMediaFile(sourcePath, userBackupPath, "Test", a.NewMessageStartTime)
 		backupResults[testFile] = backupPath
 		log.Printf("测试备份 %s: %s", testFile, backupPath)
 	}
@@ -2357,8 +2617,8 @@ func (a *App) TestFileStorageNewDataBackup(accountName string) string {
 		return fmt.Sprintf("{\"error\": \"创建测试备份目录失败: %v\"}", err)
 	}
 	
-	// 设置开始时间：2025年10月16日 00:00:00
-	startTime := time.Date(2025, 10, 16, 0, 0, 0, 0, time.Local).Unix()
+	// 使用配置的新消息开始时间
+	startTime := a.NewMessageStartTime
 	
 	// 执行FileStorage新数据备份
 	backupCount := a.backupFileStorageNewData(expPath, userBackupPath, startTime)

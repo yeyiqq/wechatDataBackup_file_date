@@ -146,6 +146,10 @@ export function TestActualImagePathDebug(arg1) {
   return window['go']['main']['App']['TestActualImagePathDebug'](arg1);
 }
 
+export function TestAutoUpdateTime() {
+  return window['go']['main']['App']['TestAutoUpdateTime']();
+}
+
 export function TestFileStorageNewDataBackup(arg1) {
   return window['go']['main']['App']['TestFileStorageNewDataBackup'](arg1);
 }
