@@ -203,11 +203,13 @@ type DialogueGroup struct {
 
 // 新消息导出结果
 type NewMessageExportResult struct {
-	TotalContacts int                    `json:"totalContacts"`
-	TotalMessages int                    `json:"totalMessages"`
-	SavePath      string                 `json:"savePath"`
-	Contacts      []ContactMessageData   `json:"contacts"`
-	ExportTime    string                 `json:"exportTime"`
+	TotalContacts    int                    `json:"totalContacts"`
+	TotalMessages    int                    `json:"totalMessages"`
+	SavePath         string                 `json:"savePath"`
+	UserBackupPath   string                 `json:"userBackupPath"`
+	BackupFilesCount int                    `json:"backupFilesCount"`
+	Contacts         []ContactMessageData   `json:"contacts"`
+	ExportTime       string                 `json:"exportTime"`
 }
 
 // 联系人消息数据
@@ -1267,17 +1269,29 @@ func (a *App) exportNewMessages(accountName, expPath string) *NewMessageExportRe
 		return nil
 	}
 	
+	// 创建User目录用于备份FileStorage数据
+	userBackupPath := fmt.Sprintf("%s\\User\\%s", savePath, accountName)
+	log.Println("用户备份路径:", userBackupPath)
+	if err := os.MkdirAll(userBackupPath, os.ModePerm); err != nil {
+		log.Printf("Error creating user backup directory: %v", err)
+		return nil
+	}
+	
 	result := &NewMessageExportResult{
-		SavePath:   savePath,
-		ExportTime: saveTime,
-		Contacts:   make([]ContactMessageData, 0),
+		SavePath:         savePath,
+		UserBackupPath:   userBackupPath,
+		BackupFilesCount: 0,
+		ExportTime:       saveTime,
+		Contacts:         make([]ContactMessageData, 0),
 	}
 	
 	// 初始化数据提供者
 	if a.provider == nil {
 		log.Println("创建新的数据提供者...")
 		var err error
-		a.provider, err = wechat.CreateWechatDataProvider(expPath, "")
+		// 构建正确的prefix路径
+		prefixPath := "\\User\\" + accountName
+		a.provider, err = wechat.CreateWechatDataProvider(expPath, prefixPath)
 		if err != nil {
 			log.Printf("Error creating data provider: %v", err)
 			return nil
@@ -1302,7 +1316,7 @@ func (a *App) exportNewMessages(accountName, expPath string) *NewMessageExportRe
 	
 	// 处理每个联系人的新消息
 	for _, contact := range contactList.Users {
-		contactData := a.processContactNewMessages(contact, startTime, savePath)
+		contactData := a.processContactNewMessages(contact, startTime, savePath, userBackupPath)
 		if contactData != nil && contactData.MessageCount > 0 {
 			result.Contacts = append(result.Contacts, *contactData)
 			result.TotalMessages += contactData.MessageCount
@@ -1310,14 +1324,23 @@ func (a *App) exportNewMessages(accountName, expPath string) *NewMessageExportRe
 	}
 	
 	result.TotalContacts = len(result.Contacts)
-	log.Printf("New message export completed: %d contacts, %d total messages", 
-		result.TotalContacts, result.TotalMessages)
+	
+	// 备份FileStorage目录中2025年10月16日之后的新数据
+	log.Println("开始备份FileStorage目录中的新数据...")
+	fileStorageBackupCount := a.backupFileStorageNewData(expPath, userBackupPath, startTime)
+	log.Printf("FileStorage新数据备份完成，共备份 %d 个文件", fileStorageBackupCount)
+	
+	// 统计备份的媒体文件数量
+	result.BackupFilesCount = a.countBackupFiles(userBackupPath)
+	
+	log.Printf("New message export completed: %d contacts, %d total messages, %d backup files", 
+		result.TotalContacts, result.TotalMessages, result.BackupFilesCount)
 	
 	return result
 }
 
 // 处理单个联系人的新消息
-func (a *App) processContactNewMessages(contact wechat.WeChatUserInfo, startTime int64, savePath string) *ContactMessageData {
+func (a *App) processContactNewMessages(contact wechat.WeChatUserInfo, startTime int64, savePath, userBackupPath string) *ContactMessageData {
 	// 获取该联系人的新消息 - 使用Backward方向获取大于startTime的消息
 	messages, err := a.provider.WeChatGetMessageListByTime(
 		contact.UserName, 
@@ -1390,8 +1413,8 @@ func (a *App) processContactNewMessages(contact wechat.WeChatUserInfo, startTime
 			}
 		}
 		
-		// 处理消息内容
-		text := a.processMessageContent(&msg, savePath)
+		// 处理消息内容并备份媒体文件
+		text := a.processMessageContentWithBackup(&msg, savePath, userBackupPath)
 		if text == "" {
 			continue
 		}
@@ -1442,6 +1465,100 @@ func (a *App) processContactNewMessages(contact wechat.WeChatUserInfo, startTime
 	
 	log.Printf("Exported %d messages for %s", contactData.MessageCount, contact.NickName)
 	return contactData
+}
+
+// 处理消息内容并备份媒体文件（用于新消息导出）
+func (a *App) processMessageContentWithBackup(msg *wechat.WeChatMessage, savePath, userBackupPath string) string {
+	switch msg.Type {
+	case wechat.Wechat_Message_Type_Text:
+		return msg.Content
+		
+	case wechat.Wechat_Message_Type_Emoji:
+		// 表情包消息
+		return "[表情包]"
+		
+	case wechat.Wechat_Message_Type_Picture:
+		log.Printf("处理图片消息 - ImagePath: %s, ThumbPath: %s", msg.ImagePath, msg.ThumbPath)
+		if msg.ImagePath != "" {
+			// 构建正确的图片路径
+			imagePath := a.buildCorrectMediaPath(msg.ImagePath, "Image")
+			log.Printf("图片路径构建结果: %s, 文件存在: %v", imagePath, a.fileExists(imagePath))
+			if imagePath != "" && a.fileExists(imagePath) {
+				// 备份图片文件
+				backupPath := a.backupMediaFile(imagePath, userBackupPath, "Image")
+				if backupPath != "" {
+					return fmt.Sprintf("[图片] %s", backupPath)
+				}
+				return fmt.Sprintf("[图片] %s", imagePath)
+			} else {
+				log.Printf("图片文件不存在，应该存在的路径: %s", imagePath)
+			}
+		} else if msg.ThumbPath != "" {
+			// 如果ImagePath为空，尝试使用ThumbPath
+			log.Printf("ImagePath为空，尝试使用ThumbPath: %s", msg.ThumbPath)
+			thumbPath := a.buildCorrectMediaPath(msg.ThumbPath, "Image")
+			log.Printf("缩略图路径构建结果: %s, 文件存在: %v", thumbPath, a.fileExists(thumbPath))
+			if thumbPath != "" && a.fileExists(thumbPath) {
+				// 备份图片文件
+				backupPath := a.backupMediaFile(thumbPath, userBackupPath, "Image")
+				if backupPath != "" {
+					return fmt.Sprintf("[图片] %s", backupPath)
+				}
+				return fmt.Sprintf("[图片] %s", thumbPath)
+			} else {
+				log.Printf("缩略图文件不存在，应该存在的路径: %s", thumbPath)
+			}
+		}
+		return "[图片] 文件不存在"
+		
+	case wechat.Wechat_Message_Type_Video:
+		if msg.VideoPath != "" {
+			// 构建正确的视频路径
+			videoPath := a.buildCorrectMediaPath(msg.VideoPath, "Video")
+			if videoPath != "" && a.fileExists(videoPath) {
+				// 备份视频文件
+				backupPath := a.backupMediaFile(videoPath, userBackupPath, "Video")
+				if backupPath != "" {
+					return fmt.Sprintf("[视频] %s", backupPath)
+				}
+				return fmt.Sprintf("[视频] %s", videoPath)
+			}
+		}
+		return "[视频] 文件不存在"
+		
+	case wechat.Wechat_Message_Type_Voice:
+		if msg.VoicePath != "" {
+			// 构建正确的语音路径
+			voicePath := a.buildCorrectMediaPath(msg.VoicePath, "Voice")
+			if voicePath != "" && a.fileExists(voicePath) {
+				// 备份语音文件
+				backupPath := a.backupMediaFile(voicePath, userBackupPath, "Voice")
+				if backupPath != "" {
+					return fmt.Sprintf("[语音] %s", backupPath)
+				}
+				return fmt.Sprintf("[语音] %s", voicePath)
+			}
+		}
+		return "[语音] 文件不存在"
+		
+	case wechat.Wechat_Message_Type_Location:
+		if msg.LocationInfo.Label != "" {
+			return fmt.Sprintf("[位置] %s", msg.LocationInfo.Label)
+		}
+		return "[位置]"
+		
+	case wechat.Wechat_Message_Type_Visit_Card:
+		if msg.VisitInfo.NickName != "" {
+			return fmt.Sprintf("[名片] %s", msg.VisitInfo.NickName)
+		}
+		return "[名片]"
+		
+	case wechat.Wechat_Message_Type_Misc:
+		return a.processMiscMessageWithBackup(msg, savePath, userBackupPath)
+		
+	default:
+		return fmt.Sprintf("[其他消息类型: %d]", msg.Type)
+	}
 }
 
 // 处理消息内容（包括媒体文件）
@@ -1550,6 +1667,104 @@ func (a *App) getMiscMessageDescription(subType int) string {
 	}
 }
 
+// 处理杂项消息并备份媒体文件（用于新消息导出）
+func (a *App) processMiscMessageWithBackup(msg *wechat.WeChatMessage, savePath, userBackupPath string) string {
+	switch msg.SubType {
+	case wechat.Wechat_Misc_Message_File:
+		if msg.FileInfo.FileName != "" {
+			// 构建正确的文件路径
+			filePath := a.buildCorrectMediaPath(msg.FileInfo.FilePath, "File")
+			if filePath != "" && a.fileExists(filePath) {
+				// 备份文件
+				backupPath := a.backupMediaFile(filePath, userBackupPath, "File")
+				if backupPath != "" {
+					return fmt.Sprintf("[文件] %s", backupPath)
+				}
+				return fmt.Sprintf("[文件] %s", filePath)
+			}
+			return fmt.Sprintf("[文件] %s (文件不存在)", msg.FileInfo.FileName)
+		}
+		return "[文件]"
+		
+	case wechat.Wechat_Misc_Message_Music:
+		if msg.MusicInfo.Title != "" {
+			return fmt.Sprintf("[音乐] %s - %s", msg.MusicInfo.Title, msg.MusicInfo.DisPlayName)
+		}
+		return "[音乐]"
+		
+	case wechat.Wechat_Misc_Message_ThirdVideo:
+		if msg.ThumbPath != "" {
+			thumbPath := a.buildCorrectMediaPath(msg.ThumbPath, "Thumb")
+			if thumbPath != "" && a.fileExists(thumbPath) {
+				// 备份缩略图
+				backupPath := a.backupMediaFile(thumbPath, userBackupPath, "Thumb")
+				if backupPath != "" {
+					return fmt.Sprintf("[第三方视频] %s", backupPath)
+				}
+				return fmt.Sprintf("[第三方视频] %s", thumbPath)
+			}
+		}
+		return "[第三方视频]"
+		
+	case wechat.Wechat_Misc_Message_CardLink:
+		if msg.ThumbPath != "" {
+			thumbPath := a.buildCorrectMediaPath(msg.ThumbPath, "Thumb")
+			if thumbPath != "" && a.fileExists(thumbPath) {
+				// 备份缩略图
+				backupPath := a.backupMediaFile(thumbPath, userBackupPath, "Thumb")
+				if backupPath != "" {
+					return fmt.Sprintf("[链接卡片] %s", backupPath)
+				}
+				return fmt.Sprintf("[链接卡片] %s", thumbPath)
+			}
+		}
+		return "[链接卡片]"
+		
+	case wechat.Wechat_Misc_Message_Applet, wechat.Wechat_Misc_Message_Applet2:
+		if msg.ThumbPath != "" {
+			thumbPath := a.buildCorrectMediaPath(msg.ThumbPath, "Thumb")
+			if thumbPath != "" && a.fileExists(thumbPath) {
+				// 备份缩略图
+				backupPath := a.backupMediaFile(thumbPath, userBackupPath, "Thumb")
+				if backupPath != "" {
+					return fmt.Sprintf("[小程序] %s", backupPath)
+				}
+				return fmt.Sprintf("[小程序] %s", thumbPath)
+			}
+		}
+		return "[小程序]"
+		
+	case wechat.Wechat_Misc_Message_Channels:
+		if msg.ThumbPath != "" {
+			thumbPath := a.buildCorrectMediaPath(msg.ThumbPath, "Thumb")
+			if thumbPath != "" && a.fileExists(thumbPath) {
+				// 备份缩略图
+				backupPath := a.backupMediaFile(thumbPath, userBackupPath, "Thumb")
+				if backupPath != "" {
+					return fmt.Sprintf("[视频号] %s", backupPath)
+				}
+				return fmt.Sprintf("[视频号] %s", thumbPath)
+			}
+		}
+		return "[视频号]"
+		
+	case wechat.Wechat_Misc_Message_Refer:
+		// 引用消息 - 显示格式：[消息]speaker的内容，[引用消息]被引用的人的昵称：被引用的内容
+		if msg.ReferInfo.Content != "" {
+			referContent := msg.ReferInfo.Content
+			referDisplayName := msg.ReferInfo.Displayname
+			if referDisplayName == "" {
+				referDisplayName = "未知用户"
+			}
+			return fmt.Sprintf("[消息]%s，[引用消息]%s：%s", msg.Content, referDisplayName, referContent)
+		}
+		return fmt.Sprintf("[消息]%s，[引用消息]", msg.Content)
+		
+	default:
+		return fmt.Sprintf("[%s]", a.getMiscMessageDescription(msg.SubType))
+	}
+}
+
 // 处理杂项消息
 func (a *App) processMiscMessage(msg *wechat.WeChatMessage, savePath string) string {
 	switch msg.SubType {
@@ -1640,16 +1855,18 @@ func (a *App) buildCorrectMediaPath(originalPath, mediaType string) string {
 	
 	// 调试日志：记录原始路径信息
 	log.Printf("媒体文件路径构建开始 - 原始路径: %s, 媒体类型: %s, 用户名: %s", 
-		originalPath, mediaType, a.provider.SelfInfo.UserName)
+		originalPath, mediaType, a.defaultUser)
 	
-	// 检查路径是否已经包含完整路径
+	// 特殊处理：如果路径包含FileStorage，需要正确处理路径
 	if strings.Contains(normalizedPath, "FileStorage\\") {
-		// 路径已经包含FileStorage，直接拼接用户数据目录
+		// 路径已经包含完整的User\wxid_xxx\FileStorage\...，直接使用
 		if strings.HasPrefix(normalizedPath, "\\") {
-			correctPath = userDataDir + normalizedPath
+			correctPath = "." + normalizedPath // 添加当前目录前缀
 		} else {
-			correctPath = userDataDir + "\\" + normalizedPath
+			correctPath = ".\\" + normalizedPath
 		}
+		log.Printf("媒体文件路径构建完成 - 构建路径: %s, 文件存在: %v", correctPath, a.fileExists(correctPath))
+		return correctPath
 	} else {
 		// 路径不包含FileStorage，需要根据媒体类型添加正确的子目录
 		// 确保路径以反斜杠开头
@@ -1659,8 +1876,8 @@ func (a *App) buildCorrectMediaPath(originalPath, mediaType string) string {
 		
 		switch mediaType {
 		case "Image":
-			// 图片文件路径：FileStorage/Image/
-			correctPath = userDataDir + "\\FileStorage\\Image" + normalizedPath
+			// 图片文件路径：保持MsgAttach结构，但指向解码后的文件
+			correctPath = userDataDir + "\\FileStorage\\MsgAttach" + normalizedPath
 		case "Thumb":
 			// 缩略图路径：FileStorage/MsgAttach/xxx/Thumb/
 			correctPath = userDataDir + "\\FileStorage\\MsgAttach" + normalizedPath
@@ -1692,7 +1909,161 @@ func (a *App) buildCorrectMediaPath(originalPath, mediaType string) string {
 // 检查文件是否存在
 func (a *App) fileExists(filePath string) bool {
 	_, err := os.Stat(filePath)
-	return err == nil
+	exists := err == nil
+	if !exists {
+		log.Printf("文件不存在: %s", filePath)
+	}
+	return exists
+}
+
+// 备份媒体文件到指定目录，保持原有目录结构
+func (a *App) backupMediaFile(sourcePath, userBackupPath, mediaType string) string {
+	if sourcePath == "" || !a.fileExists(sourcePath) {
+		return ""
+	}
+	
+	// 获取源文件的相对路径（相对于User目录）
+	userDataDir := a.FLoader.FilePrefix + "\\User\\" + a.defaultUser
+	relPath, err := filepath.Rel(userDataDir, sourcePath)
+	if err != nil {
+		log.Printf("Error calculating relative path for %s: %v", sourcePath, err)
+		return ""
+	}
+	
+	// 构建备份目标路径
+	backupFilePath := filepath.Join(userBackupPath, relPath)
+	backupDir := filepath.Dir(backupFilePath)
+	
+	// 创建备份目录
+	if err := os.MkdirAll(backupDir, os.ModePerm); err != nil {
+		log.Printf("Error creating backup directory %s: %v", backupDir, err)
+		return ""
+	}
+	
+	// 检查文件是否已经备份过（避免重复备份）
+	if _, err := os.Stat(backupFilePath); err == nil {
+		log.Printf("File already backed up: %s", backupFilePath)
+		return backupFilePath
+	}
+	
+	// 复制文件
+	if _, err := utils.CopyFile(sourcePath, backupFilePath); err != nil {
+		log.Printf("Error copying file %s to %s: %v", sourcePath, backupFilePath, err)
+		return ""
+	}
+	
+	log.Printf("Successfully backed up media file: %s -> %s", sourcePath, backupFilePath)
+	return backupFilePath
+}
+
+// 备份FileStorage目录中指定时间之后的新数据
+func (a *App) backupFileStorageNewData(expPath, userBackupPath string, startTime int64) int {
+	fileStoragePath := expPath + "\\FileStorage"
+	if _, err := os.Stat(fileStoragePath); err != nil {
+		log.Printf("FileStorage目录不存在: %s", fileStoragePath)
+		return 0
+	}
+	
+	backupCount := 0
+	startTimeObj := time.Unix(startTime, 0)
+	
+	log.Printf("开始扫描FileStorage目录: %s，查找 %s 之后的新文件", fileStoragePath, startTimeObj.Format("2006-01-02 15:04:05"))
+	
+	err := filepath.Walk(fileStoragePath, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			log.Printf("访问文件时出错: %s, %v", path, err)
+			return nil // 继续处理其他文件
+		}
+		
+		// 跳过目录
+		if info.IsDir() {
+			return nil
+		}
+		
+		// 检查文件修改时间是否在指定时间之后
+		fileModTime := info.ModTime()
+		if fileModTime.After(startTimeObj) || fileModTime.Equal(startTimeObj) {
+			// 特殊处理：如果是MsgAttach目录中的图片文件，需要检查是否是解码后的文件
+			if strings.Contains(path, "\\MsgAttach\\") && strings.Contains(path, "\\Image\\") {
+				// 检查是否是常见图片格式
+				ext := strings.ToLower(filepath.Ext(path))
+				imageExts := []string{".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tif"}
+				isImageFile := false
+				for _, imgExt := range imageExts {
+					if ext == imgExt {
+						isImageFile = true
+						break
+					}
+				}
+				
+				if !isImageFile {
+					// 不是图片文件，跳过
+					return nil
+				}
+			}
+			
+			// 计算相对路径（相对于expPath）
+			relPath, err := filepath.Rel(expPath, path)
+			if err != nil {
+				log.Printf("计算相对路径失败: %s, %v", path, err)
+				return nil
+			}
+			
+			// 构建备份目标路径
+			backupFilePath := filepath.Join(userBackupPath, relPath)
+			backupDir := filepath.Dir(backupFilePath)
+			
+			// 创建备份目录
+			if err := os.MkdirAll(backupDir, os.ModePerm); err != nil {
+				log.Printf("创建备份目录失败: %s, %v", backupDir, err)
+				return nil
+			}
+			
+			// 检查文件是否已经备份过（避免重复备份）
+			if _, err := os.Stat(backupFilePath); err == nil {
+				log.Printf("文件已备份，跳过: %s", backupFilePath)
+				return nil
+			}
+			
+			// 复制文件
+			if _, err := utils.CopyFile(path, backupFilePath); err != nil {
+				log.Printf("备份文件失败: %s -> %s, %v", path, backupFilePath, err)
+				return nil
+			}
+			
+			backupCount++
+			log.Printf("成功备份新文件: %s -> %s (修改时间: %s)", 
+				path, backupFilePath, fileModTime.Format("2006-01-02 15:04:05"))
+		}
+		
+		return nil
+	})
+	
+	if err != nil {
+		log.Printf("扫描FileStorage目录时出错: %v", err)
+	}
+	
+	log.Printf("FileStorage新数据备份完成，共备份 %d 个文件", backupCount)
+	return backupCount
+}
+
+// 统计备份目录中的文件数量
+func (a *App) countBackupFiles(backupPath string) int {
+	count := 0
+	err := filepath.Walk(backupPath, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() {
+			count++
+		}
+		return nil
+	})
+	if err != nil {
+		log.Printf("Error counting backup files: %v", err)
+		return 0
+	}
+	return count
 }
 
 // 保存联系人消息到JSON文件
@@ -1805,4 +2176,382 @@ func (a *App) TestNewMessageExport(accountName string) string {
 		log.Println("测试失败，返回nil")
 		return "{\"error\": \"测试失败，返回nil\"}"
 	}
+}
+
+// 测试媒体文件备份功能
+func (a *App) TestMediaFileBackup(accountName string) string {
+	log.Println("测试媒体文件备份功能...")
+	
+	// 设置导出路径
+	expPath := a.FLoader.FilePrefix + "\\User\\" + accountName
+	userBackupPath := fmt.Sprintf(".\\save\\test_backup\\User\\%s", accountName)
+	
+	log.Println("测试导出路径:", expPath)
+	log.Println("测试备份路径:", userBackupPath)
+	
+	// 创建备份目录
+	if err := os.MkdirAll(userBackupPath, os.ModePerm); err != nil {
+		log.Printf("Error creating test backup directory: %v", err)
+		return fmt.Sprintf("{\"error\": \"创建测试备份目录失败: %v\"}", err)
+	}
+	
+	// 测试备份功能
+	testFiles := []string{
+		"FileStorage\\Image\\2025-10\\test.jpg",
+		"FileStorage\\Video\\2025-10\\test.mp4",
+		"FileStorage\\Voice\\test.mp3",
+		"FileStorage\\File\\2025-10\\test.docx",
+	}
+	
+	backupResults := make(map[string]string)
+	for _, testFile := range testFiles {
+		sourcePath := expPath + "\\" + testFile
+		backupPath := a.backupMediaFile(sourcePath, userBackupPath, "Test")
+		backupResults[testFile] = backupPath
+		log.Printf("测试备份 %s: %s", testFile, backupPath)
+	}
+	
+	// 统计备份文件数量
+	backupCount := a.countBackupFiles(userBackupPath)
+	
+	result := map[string]interface{}{
+		"backupPath":     userBackupPath,
+		"backupCount":    backupCount,
+		"backupResults":  backupResults,
+		"testFiles":      testFiles,
+	}
+	
+	resultJson, _ := json.Marshal(result)
+	log.Println("备份测试结果:", string(resultJson))
+	return string(resultJson)
+}
+
+// 测试图片路径修复功能
+func (a *App) TestImagePathFix(accountName string) string {
+	log.Println("测试图片路径修复功能...")
+	
+	// 设置默认用户
+	a.defaultUser = accountName
+	
+	// 测试各种图片路径格式
+	testCases := []struct {
+		originalPath string
+		mediaType    string
+		description  string
+	}{
+		{
+			"MsgAttach\\90d9d578e0aacfb7cb69de1f23181c6e\\Image\\2025-10\\1c0c5a27e175be47da63a69aed480803.jpeg",
+			"Image",
+			"MsgAttach图片路径（应该保持MsgAttach结构）",
+		},
+		{
+			"MsgAttach\\2bebb2328c0543d04cf272d257a5a72f\\Image\\2025-10\\96beb144fda427c9a43744bfaa9382c4.jpeg",
+			"Image",
+			"MsgAttach图片路径2（应该保持MsgAttach结构）",
+		},
+		{
+			"FileStorage\\MsgAttach\\90d9d578e0aacfb7cb69de1f23181c6e\\Image\\2025-10\\1c0c5a27e175be47da63a69aed480803.jpeg",
+			"Image",
+			"完整MsgAttach路径（应该保持不变）",
+		},
+		{
+			"MsgAttach\\abc123\\Thumb\\2025-10\\test.jpg",
+			"Thumb",
+			"MsgAttach缩略图路径（应该保持MsgAttach路径）",
+		},
+		{
+			"FileStorage\\Video\\2025-10\\test.mp4",
+			"Video",
+			"视频文件路径（应该保持不变）",
+		},
+	}
+	
+	results := make([]map[string]interface{}, 0)
+	
+	for _, tc := range testCases {
+		correctPath := a.buildCorrectMediaPath(tc.originalPath, tc.mediaType)
+		fileExists := a.fileExists(correctPath)
+		
+		result := map[string]interface{}{
+			"description":   tc.description,
+			"originalPath":  tc.originalPath,
+			"mediaType":     tc.mediaType,
+			"correctPath":   correctPath,
+			"fileExists":    fileExists,
+		}
+		
+		results = append(results, result)
+		log.Printf("测试 %s: %s -> %s (存在: %v)", 
+			tc.description, tc.originalPath, correctPath, fileExists)
+	}
+	
+	finalResult := map[string]interface{}{
+		"accountName": accountName,
+		"testResults": results,
+	}
+	
+	resultJson, _ := json.MarshalIndent(finalResult, "", "  ")
+	log.Println("图片路径修复测试结果:", string(resultJson))
+	return string(resultJson)
+}
+
+// 测试实际图片消息处理
+func (a *App) TestActualImageMessage(accountName string) string {
+	log.Println("测试实际图片消息处理...")
+	
+	// 设置默认用户
+	a.defaultUser = accountName
+	
+	// 模拟一个图片消息
+	msg := &wechat.WeChatMessage{
+		Type:      wechat.Wechat_Message_Type_Picture,
+		ImagePath: "MsgAttach\\90d9d578e0aacfb7cb69de1f23181c6e\\Image\\2025-10\\1c0c5a27e175be47da63a69aed480803.jpeg",
+		ThumbPath: "MsgAttach\\90d9d578e0aacfb7cb69de1f23181c6e\\Thumb\\2025-10\\bffddc61ae0bd46a0ba0a8b8b7a1172c_t.jpeg",
+	}
+	
+	// 测试路径构建
+	imagePath := a.buildCorrectMediaPath(msg.ImagePath, "Image")
+	thumbPath := a.buildCorrectMediaPath(msg.ThumbPath, "Thumb")
+	
+	// 测试文件存在性
+	imageExists := a.fileExists(imagePath)
+	thumbExists := a.fileExists(thumbPath)
+	
+	// 测试消息处理
+	savePath := ".\\save\\test"
+	userBackupPath := ".\\save\\test\\User\\" + accountName
+	os.MkdirAll(userBackupPath, os.ModePerm)
+	
+	text := a.processMessageContentWithBackup(msg, savePath, userBackupPath)
+	
+	result := map[string]interface{}{
+		"accountName":     accountName,
+		"imagePath":       msg.ImagePath,
+		"thumbPath":       msg.ThumbPath,
+		"builtImagePath":  imagePath,
+		"builtThumbPath":  thumbPath,
+		"imageExists":     imageExists,
+		"thumbExists":     thumbExists,
+		"processedText":   text,
+	}
+	
+	resultJson, _ := json.MarshalIndent(result, "", "  ")
+	log.Println("实际图片消息测试结果:", string(resultJson))
+	return string(resultJson)
+}
+
+// 测试FileStorage新数据备份功能
+func (a *App) TestFileStorageNewDataBackup(accountName string) string {
+	log.Println("测试FileStorage新数据备份功能...")
+	
+	// 设置导出路径
+	expPath := a.FLoader.FilePrefix + "\\User\\" + accountName
+	userBackupPath := fmt.Sprintf(".\\save\\test_filestorage_backup\\User\\%s", accountName)
+	
+	log.Println("测试导出路径:", expPath)
+	log.Println("测试备份路径:", userBackupPath)
+	
+	// 创建备份目录
+	if err := os.MkdirAll(userBackupPath, os.ModePerm); err != nil {
+		log.Printf("Error creating test backup directory: %v", err)
+		return fmt.Sprintf("{\"error\": \"创建测试备份目录失败: %v\"}", err)
+	}
+	
+	// 设置开始时间：2025年10月16日 00:00:00
+	startTime := time.Date(2025, 10, 16, 0, 0, 0, 0, time.Local).Unix()
+	
+	// 执行FileStorage新数据备份
+	backupCount := a.backupFileStorageNewData(expPath, userBackupPath, startTime)
+	
+	// 统计备份文件数量
+	totalBackupCount := a.countBackupFiles(userBackupPath)
+	
+	result := map[string]interface{}{
+		"expPath":           expPath,
+		"userBackupPath":    userBackupPath,
+		"startTime":         time.Unix(startTime, 0).Format("2006-01-02 15:04:05"),
+		"newDataBackupCount": backupCount,
+		"totalBackupCount":  totalBackupCount,
+		"success":           true,
+	}
+	
+	resultJson, _ := json.MarshalIndent(result, "", "  ")
+	log.Println("FileStorage新数据备份测试结果:", string(resultJson))
+	return string(resultJson)
+}
+
+// 测试MsgAttach图片路径处理
+func (a *App) TestMsgAttachImagePath(accountName string) string {
+	log.Println("测试MsgAttach图片路径处理...")
+	
+	// 设置默认用户
+	a.defaultUser = accountName
+	
+	// 测试各种MsgAttach图片路径
+	testCases := []struct {
+		originalPath string
+		mediaType    string
+		description  string
+	}{
+		{
+			"MsgAttach\\90d9d578e0aacfb7cb69de1f23181c6e\\Image\\2025-10\\1c0c5a27e175be47da63a69aed480803.jpeg",
+			"Image",
+			"MsgAttach图片路径（保持MsgAttach结构）",
+		},
+		{
+			"MsgAttach\\2bebb2328c0543d04cf272d257a5a72f\\Image\\2025-10\\96beb144fda427c9a43744bfaa9382c4.png",
+			"Image",
+			"MsgAttach PNG图片路径",
+		},
+		{
+			"MsgAttach\\abc123\\Thumb\\2025-10\\test_thumb.jpg",
+			"Thumb",
+			"MsgAttach缩略图路径",
+		},
+		{
+			"FileStorage\\MsgAttach\\90d9d578e0aacfb7cb69de1f23181c6e\\Image\\2025-10\\1c0c5a27e175be47da63a69aed480803.jpeg",
+			"Image",
+			"完整MsgAttach路径",
+		},
+	}
+	
+	results := make([]map[string]interface{}, 0)
+	
+	for _, tc := range testCases {
+		correctPath := a.buildCorrectMediaPath(tc.originalPath, tc.mediaType)
+		fileExists := a.fileExists(correctPath)
+		
+		result := map[string]interface{}{
+			"description":   tc.description,
+			"originalPath":  tc.originalPath,
+			"mediaType":     tc.mediaType,
+			"correctPath":   correctPath,
+			"fileExists":    fileExists,
+			"isMsgAttach":   strings.Contains(correctPath, "MsgAttach"),
+		}
+		
+		results = append(results, result)
+		log.Printf("测试 %s: %s -> %s (存在: %v, MsgAttach: %v)", 
+			tc.description, tc.originalPath, correctPath, fileExists, strings.Contains(correctPath, "MsgAttach"))
+	}
+	
+	finalResult := map[string]interface{}{
+		"accountName": accountName,
+		"testResults": results,
+		"summary": map[string]interface{}{
+			"totalTests": len(results),
+			"msgAttachPaths": len(results), // 所有路径都应该保持MsgAttach结构
+		},
+	}
+	
+	resultJson, _ := json.MarshalIndent(finalResult, "", "  ")
+	log.Println("MsgAttach图片路径测试结果:", string(resultJson))
+	return string(resultJson)
+}
+
+// 测试实际图片路径调试
+func (a *App) TestActualImagePathDebug(accountName string) string {
+	log.Println("测试实际图片路径调试...")
+	
+	// 设置默认用户
+	a.defaultUser = accountName
+	
+	// 模拟一个实际的图片消息
+	msg := &wechat.WeChatMessage{
+		Type:      wechat.Wechat_Message_Type_Picture,
+		ImagePath: "MsgAttach\\90d9d578e0aacfb7cb69de1f23181c6e\\Image\\2025-10\\1c0c5a27e175be47da63a69aed480803.jpeg",
+		ThumbPath: "MsgAttach\\90d9d578e0aacfb7cb69de1f23181c6e\\Thumb\\2025-10\\bffddc61ae0bd46a0ba0a8b8b7a1172c_t.jpeg",
+	}
+	
+	// 测试路径构建
+	imagePath := a.buildCorrectMediaPath(msg.ImagePath, "Image")
+	thumbPath := a.buildCorrectMediaPath(msg.ThumbPath, "Thumb")
+	
+	// 测试文件存在性
+	imageExists := a.fileExists(imagePath)
+	thumbExists := a.fileExists(thumbPath)
+	
+	// 检查实际文件路径
+	userDataDir := a.FLoader.FilePrefix + "\\User\\" + accountName
+	actualImagePath := userDataDir + "\\FileStorage\\MsgAttach\\90d9d578e0aacfb7cb69de1f23181c6e\\Image\\2025-10\\1c0c5a27e175be47da63a69aed480803.jpeg"
+	actualThumbPath := userDataDir + "\\FileStorage\\MsgAttach\\90d9d578e0aacfb7cb69de1f23181c6e\\Thumb\\2025-10\\bffddc61ae0bd46a0ba0a8b8b7a1172c_t.jpeg"
+	
+	actualImageExists := a.fileExists(actualImagePath)
+	actualThumbExists := a.fileExists(actualThumbPath)
+	
+	result := map[string]interface{}{
+		"accountName":        accountName,
+		"userDataDir":        userDataDir,
+		"msgImagePath":       msg.ImagePath,
+		"msgThumbPath":       msg.ThumbPath,
+		"builtImagePath":     imagePath,
+		"builtThumbPath":     thumbPath,
+		"imageExists":        imageExists,
+		"thumbExists":        thumbExists,
+		"actualImagePath":    actualImagePath,
+		"actualThumbPath":    actualThumbPath,
+		"actualImageExists":  actualImageExists,
+		"actualThumbExists":  actualThumbExists,
+		"pathMatch":          imagePath == actualImagePath,
+	}
+	
+	resultJson, _ := json.MarshalIndent(result, "", "  ")
+	log.Println("实际图片路径调试结果:", string(resultJson))
+	return string(resultJson)
+}
+
+// 调试图片路径构建过程
+func (a *App) DebugImagePathConstruction(accountName string) string {
+	log.Println("调试图片路径构建过程...")
+	
+	// 设置默认用户
+	a.defaultUser = accountName
+	
+	// 模拟数据库中的原始路径
+	originalDbPath := "MsgAttach\\90d9d578e0aacfb7cb69de1f23181c6e\\Image\\2025-10\\1c0c5a27e175be47da63a69aed480803.dat"
+	
+	// 模拟wechatDataProvider中的路径构建过程
+	prefixResPath := "\\User\\" + accountName
+	constructedPath := prefixResPath + "\\FileStorage\\" + originalDbPath
+	
+	log.Printf("原始数据库路径: %s", originalDbPath)
+	log.Printf("prefixResPath: %s", prefixResPath)
+	log.Printf("构建的路径: %s", constructedPath)
+	
+	// 检查.dat文件是否存在
+	datExists := a.fileExists(constructedPath)
+	log.Printf(".dat文件存在: %v", datExists)
+	
+	// 模拟解码过程
+	decodedPath := strings.TrimSuffix(constructedPath, ".dat")
+	extensions := []string{".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tif"}
+	var foundPath string
+	for _, ext := range extensions {
+		testPath := decodedPath + ext
+		if a.fileExists(testPath) {
+			foundPath = testPath
+			log.Printf("找到解码文件: %s", testPath)
+			break
+		}
+	}
+	
+	// 测试buildCorrectMediaPath
+	finalPath := a.buildCorrectMediaPath(foundPath, "Image")
+	finalExists := a.fileExists(finalPath)
+	
+	result := map[string]interface{}{
+		"accountName":      accountName,
+		"originalDbPath":   originalDbPath,
+		"prefixResPath":    prefixResPath,
+		"constructedPath":  constructedPath,
+		"datExists":        datExists,
+		"decodedPath":      decodedPath,
+		"foundPath":        foundPath,
+		"finalPath":        finalPath,
+		"finalExists":      finalExists,
+	}
+	
+	resultJson, _ := json.MarshalIndent(result, "", "  ")
+	log.Println("图片路径构建调试结果:", string(resultJson))
+	return string(resultJson)
 }

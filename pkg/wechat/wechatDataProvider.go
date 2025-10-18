@@ -298,7 +298,8 @@ func CreateWechatDataProvider(resPath string, prefixRes string) (*WechatDataProv
 	provider.resPath = resPath
 	provider.prefixResPath = prefixRes
 	provider.msgDBs = make([]*wechatMsgDB, 0)
-	log.Println(resPath)
+	log.Printf("CreateWechatDataProvider - resPath: %s", resPath)
+	log.Printf("CreateWechatDataProvider - prefixRes: %s", prefixRes)
 
 	userName := filepath.Base(resPath)
 	MicroMsgDBPath := resPath + "\\Msg\\" + MicroMsgDB
@@ -914,7 +915,55 @@ func (P *WechatDataProvider) wechatMessageExtraHandle(msg *WeChatMessage) {
 		case 3:
 			if len(ext.Field2) > 0 {
 				if msg.Type == Wechat_Message_Type_Picture || msg.Type == Wechat_Message_Type_Video || msg.Type == Wechat_Message_Type_Misc {
-					msg.ThumbPath = P.prefixResPath + ext.Field2[len(P.SelfInfo.UserName):]
+					// 保持原始路径结构，但指向解码后的文件
+					// ext.Field2 格式应该是 \User\wxid_xxx\FileStorage\...，需要去掉 \User\wxid_xxx 部分
+					log.Printf("wechatDataProvider - ext.Field2: %s", ext.Field2)
+					log.Printf("wechatDataProvider - P.SelfInfo.UserName: %s", P.SelfInfo.UserName)
+					
+					var originalPath string
+					// 处理不同的 ext.Field2 格式
+					userPrefix1 := "\\User\\" + P.SelfInfo.UserName + "\\"  // \User\wxid_xxx\
+					userPrefix2 := P.SelfInfo.UserName + "\\"               // wxid_xxx\
+					
+					if strings.HasPrefix(ext.Field2, userPrefix1) {
+						// 格式: \User\wxid_xxx\FileStorage\...
+						relativePath := strings.TrimPrefix(ext.Field2, userPrefix1)
+						originalPath = P.prefixResPath + "\\" + relativePath
+						log.Printf("wechatDataProvider - 格式1相对路径: %s", relativePath)
+						log.Printf("wechatDataProvider - 构建ThumbPath: %s", originalPath)
+					} else if strings.HasPrefix(ext.Field2, userPrefix2) {
+						// 格式: wxid_xxx\FileStorage\...
+						relativePath := strings.TrimPrefix(ext.Field2, userPrefix2)
+						originalPath = P.prefixResPath + "\\" + relativePath
+						log.Printf("wechatDataProvider - 格式2相对路径: %s", relativePath)
+						log.Printf("wechatDataProvider - 构建ThumbPath: %s", originalPath)
+					} else {
+						// 如果格式不匹配，使用原来的逻辑
+						originalPath = P.prefixResPath + ext.Field2[len(P.SelfInfo.UserName):]
+						log.Printf("wechatDataProvider - 使用原逻辑构建ThumbPath: %s", originalPath)
+					}
+					// 将 .dat 扩展名替换为解码后的扩展名
+					if strings.HasSuffix(originalPath, ".dat") {
+						// 检查解码后的文件是否存在
+						decodedPath := strings.TrimSuffix(originalPath, ".dat")
+						log.Printf("wechatDataProvider - 解码路径: %s", decodedPath)
+						// 尝试常见的图片扩展名
+						extensions := []string{".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tif"}
+						for _, ext := range extensions {
+							testPath := decodedPath + ext
+							// 构建相对于当前工作目录的路径
+							relativeTestPath := "." + testPath
+							if _, err := os.Stat(relativeTestPath); err == nil {
+								originalPath = testPath
+								log.Printf("wechatDataProvider - 找到解码文件: %s", relativeTestPath)
+								break
+							} else {
+								log.Printf("wechatDataProvider - 解码文件不存在: %s", relativeTestPath)
+							}
+						}
+					}
+					msg.ThumbPath = originalPath
+					log.Printf("wechatDataProvider - 最终ThumbPath: %s", msg.ThumbPath)
 				}
 
 				if msg.Type == Wechat_Message_Type_Misc && (msg.SubType == Wechat_Misc_Message_Music || msg.SubType == Wechat_Misc_Message_TingListen) {
@@ -928,9 +977,62 @@ func (P *WechatDataProvider) wechatMessageExtraHandle(msg *WeChatMessage) {
 				if msg.Type == Wechat_Message_Type_Misc && msg.SubType == Wechat_Misc_Message_File {
 					msg.FileInfo.FilePath = P.prefixResPath + ext.Field2[len(P.SelfInfo.UserName):]
 					msg.FileInfo.FileName = filepath.Base(ext.Field2)
-				} else if msg.Type == Wechat_Message_Type_Picture || msg.Type == Wechat_Message_Type_Video || msg.Type == Wechat_Message_Type_Misc {
-					msg.ImagePath = P.prefixResPath + ext.Field2[len(P.SelfInfo.UserName):]
-					msg.VideoPath = P.prefixResPath + ext.Field2[len(P.SelfInfo.UserName):]
+				} else if msg.Type == Wechat_Message_Type_Picture || msg.Type == Wechat_Message_Type_Video {
+					// 保持原始路径结构，但指向解码后的文件
+					// ext.Field2 格式应该是 \User\wxid_xxx\FileStorage\...，需要去掉 \User\wxid_xxx 部分
+					log.Printf("wechatDataProvider - ext.Field2: %s", ext.Field2)
+					log.Printf("wechatDataProvider - P.SelfInfo.UserName: %s", P.SelfInfo.UserName)
+					log.Printf("wechatDataProvider - P.prefixResPath: %s", P.prefixResPath)
+					
+					var originalPath string
+					// 处理不同的 ext.Field2 格式
+					userPrefix1 := "\\User\\" + P.SelfInfo.UserName + "\\"  // \User\wxid_xxx\
+					userPrefix2 := P.SelfInfo.UserName + "\\"               // wxid_xxx\
+					
+					if strings.HasPrefix(ext.Field2, userPrefix1) {
+						// 格式: \User\wxid_xxx\FileStorage\...
+						relativePath := strings.TrimPrefix(ext.Field2, userPrefix1)
+						originalPath = P.prefixResPath + "\\" + relativePath
+						log.Printf("wechatDataProvider - 格式1相对路径: %s", relativePath)
+						log.Printf("wechatDataProvider - 构建ImagePath/VideoPath: %s", originalPath)
+					} else if strings.HasPrefix(ext.Field2, userPrefix2) {
+						// 格式: wxid_xxx\FileStorage\...
+						relativePath := strings.TrimPrefix(ext.Field2, userPrefix2)
+						originalPath = P.prefixResPath + "\\" + relativePath
+						log.Printf("wechatDataProvider - 格式2相对路径: %s", relativePath)
+						log.Printf("wechatDataProvider - 构建ImagePath/VideoPath: %s", originalPath)
+					} else {
+						// 如果格式不匹配，使用原来的逻辑
+						originalPath = P.prefixResPath + ext.Field2[len(P.SelfInfo.UserName):]
+						log.Printf("wechatDataProvider - 使用原逻辑构建ImagePath/VideoPath: %s", originalPath)
+					}
+					// 将 .dat 扩展名替换为解码后的扩展名
+					if strings.HasSuffix(originalPath, ".dat") {
+						// 检查解码后的文件是否存在
+						decodedPath := strings.TrimSuffix(originalPath, ".dat")
+						log.Printf("wechatDataProvider - 解码路径: %s", decodedPath)
+						// 尝试常见的图片扩展名
+						extensions := []string{".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tif"}
+						for _, ext := range extensions {
+							testPath := decodedPath + ext
+							// 构建相对于当前工作目录的路径
+							relativeTestPath := "." + testPath
+							if _, err := os.Stat(relativeTestPath); err == nil {
+								originalPath = testPath
+								log.Printf("wechatDataProvider - 找到解码文件: %s", relativeTestPath)
+								break
+							} else {
+								log.Printf("wechatDataProvider - 解码文件不存在: %s", relativeTestPath)
+							}
+						}
+					}
+					if msg.Type == Wechat_Message_Type_Picture {
+						msg.ImagePath = originalPath
+						log.Printf("wechatDataProvider - 最终ImagePath: %s", msg.ImagePath)
+					} else if msg.Type == Wechat_Message_Type_Video {
+						msg.VideoPath = originalPath
+						log.Printf("wechatDataProvider - 最终VideoPath: %s", msg.VideoPath)
+					}
 				}
 			}
 		}
